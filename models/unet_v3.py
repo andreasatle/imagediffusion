@@ -78,12 +78,14 @@ class UNetV3(nn.Module):
         self.base_channels = base_channels
         self.temb_dim = temb_dim
 
-        # Time embedding MLP
+        # Time embedding MLP + optional class embedding
         self.time_mlp = nn.Sequential(
             nn.Linear(32, temb_dim),
             nn.SiLU(),
             nn.Linear(temb_dim, temb_dim),
         )
+        self.null_class = 10
+        self.class_emb = nn.Embedding(self.null_class + 1, temb_dim)
 
         # ---- Encoder ----
         # initial 28x28 conv
@@ -127,49 +129,56 @@ class UNetV3(nn.Module):
         # final output conv (predict epsilon)
         self.conv_out = nn.Conv2d(base_channels, 1, 3, padding=1)
 
-    def forward(self, x, t):
+    def forward(self, x, t, y=None):
         """
         x: [B, 1, 28, 28]
         t: [B] (int64 or float)
+        y: [B] or None for unconditional
         returns: epsilon prediction, [B, 1, 28, 28]
         """
         # time embedding
         t_emb = sinusoidal_embedding(t, dim=32)         # [B, 32]
         t_emb = self.time_mlp(t_emb)                    # [B, temb_dim]
+        cond = t_emb
+
+        if y is not None:
+            y_long = y.long().clamp(0, self.null_class)
+            class_emb = self.class_emb(y_long)          # [B, temb_dim]
+            mask = (y_long != self.null_class).float().unsqueeze(1)
+            cond = cond + class_emb * mask
 
         # ----- Encoder -----
         # 28x28
         x0 = self.conv_in(x)                            # [B, 64, 28, 28]
-        x1 = self.enc_block1_1(x0, t_emb)               # [B, 64, 28, 28]
-        x1 = self.enc_block1_2(x1, t_emb)               # [B, 64, 28, 28]
+        x1 = self.enc_block1_1(x0, cond)                # [B, 64, 28, 28]
+        x1 = self.enc_block1_2(x1, cond)                # [B, 64, 28, 28]
         skip1 = x1
 
         # 28x28 -> 14x14
         x2 = self.down1(x1)                             # [B, 128, 14, 14]
-        x2 = self.enc_block2_1(x2, t_emb)               # [B, 128, 14, 14]
-        x2 = self.enc_block2_2(x2, t_emb)               # [B, 128, 14, 14]
+        x2 = self.enc_block2_1(x2, cond)                # [B, 128, 14, 14]
+        x2 = self.enc_block2_2(x2, cond)                # [B, 128, 14, 14]
         skip2 = x2
 
         # 14x14 -> 7x7
         x3 = self.down2(x2)                             # [B, 256, 7, 7]
 
         # ----- Bottleneck -----
-        x3 = self.mid_block1(x3, t_emb)                 # [B, 256, 7, 7]
-        x3 = self.mid_block2(x3, t_emb)                 # [B, 256, 7, 7]
+        x3 = self.mid_block1(x3, cond)                  # [B, 256, 7, 7]
+        x3 = self.mid_block2(x3, cond)                  # [B, 256, 7, 7]
 
         # ----- Decoder -----
         # 7x7 -> 14x14
         u2 = self.up2(x3)                               # [B, 128, 14, 14]
         u2 = torch.cat([u2, skip2], dim=1)              # [B, 256, 14, 14]
-        u2 = self.dec_block2_1(u2, t_emb)               # [B, 128, 14, 14]
-        u2 = self.dec_block2_2(u2, t_emb)               # [B, 128, 14, 14]
+        u2 = self.dec_block2_1(u2, cond)                # [B, 128, 14, 14]
+        u2 = self.dec_block2_2(u2, cond)                # [B, 128, 14, 14]
 
         # 14x14 -> 28x28
         u1 = self.up1(u2)                               # [B, 64, 28, 28]
         u1 = torch.cat([u1, skip1], dim=1)              # [B, 128, 28, 28]
-        u1 = self.dec_block1_1(u1, t_emb)               # [B, 64, 28, 28]
-        u1 = self.dec_block1_2(u1, t_emb)               # [B, 64, 28, 28]
+        u1 = self.dec_block1_1(u1, cond)                # [B, 64, 28, 28]
+        u1 = self.dec_block1_2(u1, cond)                # [B, 64, 28, 28]
 
         out = self.conv_out(u1)                         # [B, 1, 28, 28]
         return out
-

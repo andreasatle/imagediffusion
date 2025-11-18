@@ -12,3 +12,4 @@ wheels/
 data/
 output/
 output-v1/
+.DS_Store

@@ -11,12 +11,15 @@ class MiniUNetV2(nn.Module):
         super().__init__()
 
         self.base_channels = base_channels
+        self.temb_dim = 128
+        self.null_class = 10
 
         self.time_mlp = nn.Sequential(
             nn.Linear(32, 128),
             nn.SiLU(),
             nn.Linear(128, 128),
         )
+        self.class_emb = nn.Embedding(self.null_class + 1, self.temb_dim)
 
         self.enc1 = nn.Sequential(
             nn.Conv2d(1, base_channels, 3, padding=1),
@@ -70,10 +73,14 @@ class MiniUNetV2(nn.Module):
 
         self.conv_out = nn.Conv2d(base_channels, 1, 3, padding=1)
 
-    def forward(self, x, t):
+    def forward(self, x, t, y=None):
         B = x.shape[0]
 
         temb = self.time_mlp(sinusoidal_embedding(t, 32))
+        if y is not None:
+            y_long = y.long().clamp(0, self.null_class)
+            mask = (y_long != self.null_class).float().unsqueeze(1)
+            temb = temb + self.class_emb(y_long) * mask
 
         def add_time(h, ch):
             return h + temb[:, :ch].view(B, ch, 1, 1)

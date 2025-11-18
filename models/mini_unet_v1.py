@@ -4,17 +4,20 @@ import torch.nn as nn
 from .time_embedding import sinusoidal_embedding
 
 
-class MiniUNet(nn.Module):
+class MiniUNetV1(nn.Module):
     """One downsample/up mini U-Net."""
 
     def __init__(self, T, base_channels=32):
         super().__init__()
 
+        self.temb_dim = 64
+        self.null_class = 10
         self.time_mlp = nn.Sequential(
             nn.Linear(32, 64),
             nn.SiLU(),
             nn.Linear(64, 64),
         )
+        self.class_emb = nn.Embedding(self.null_class + 1, self.temb_dim)
 
         self.conv_in = nn.Conv2d(1, base_channels, 3, padding=1)
 
@@ -46,9 +49,14 @@ class MiniUNet(nn.Module):
 
         self.conv_out = nn.Conv2d(base_channels, 1, 3, padding=1)
 
-    def forward(self, x, t):
+    def forward(self, x, t, y=None):
         t_emb = sinusoidal_embedding(t, 32)
         t_emb = self.time_mlp(t_emb)
+        if y is not None:
+            y_long = y.long().clamp(0, self.null_class)
+            mask = (y_long != self.null_class).float().unsqueeze(1)
+            class_emb = self.class_emb(y_long)
+            t_emb = t_emb + class_emb * mask
         t_emb = t_emb[:, :, None, None]
 
         x1 = self.conv_in(x)
